@@ -403,6 +403,7 @@ describe("BitbucketServer Integration Tests", () => {
             { action: "COMMENTED", user: { name: "user2" } },
             { action: "REVIEWED", user: { name: "user3" } },
           ],
+          isLastPage: true,
         },
       });
 
@@ -416,13 +417,14 @@ describe("BitbucketServer Integration Tests", () => {
       });
 
       const content = result.content as Array<{ type: string; text: string }>;
-      const parsed = JSON.parse(content[0].text);
+      const { values: parsed, isLastPage } = JSON.parse(content[0].text);
       expect(parsed).toHaveLength(2);
       expect(
         parsed.every((r: { action: string }) =>
           ["APPROVED", "REVIEWED"].includes(r.action),
         ),
       ).toBe(true);
+      expect(isLastPage).toBe(true);
     });
   });
 

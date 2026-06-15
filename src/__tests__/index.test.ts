@@ -322,6 +322,7 @@ describe("BitbucketServer", () => {
             { action: "COMMENTED", user: { name: "user2" } },
             { action: "REVIEWED", user: { name: "user3" } },
           ],
+          isLastPage: true,
         }),
       );
 
@@ -331,13 +332,14 @@ describe("BitbucketServer", () => {
         prId: 1,
       });
 
-      const reviews = JSON.parse(result.content[0].text);
+      const { values: reviews, isLastPage } = JSON.parse(result.content[0].text);
       expect(reviews).toHaveLength(2);
       expect(
         reviews.every((r: { action: string }) =>
           ["APPROVED", "REVIEWED"].includes(r.action),
         ),
       ).toBe(true);
+      expect(isLastPage).toBe(true);
     });
 
     test("should add comment with parent", async () => {
@@ -356,6 +358,224 @@ describe("BitbucketServer", () => {
         { text: "Test comment", parent: { id: 123 } },
       );
       expect(JSON.parse(result.content[0].text)).toEqual({ id: 456 });
+    });
+  });
+
+  describe("Activities / Comments / Reviews pagination", () => {
+    beforeEach(() => {
+      makeServer(BASE_ENV);
+    });
+
+    const ACTIVITIES_URL =
+      "/projects/TEST/repos/repo/pull-requests/1/activities";
+
+    // ---- start / limit pass-through ----------------------------------------
+
+    test("get_activities passes start and limit to the API", async () => {
+      mockApiGet.mockResolvedValueOnce(
+        createAxiosResponse({ values: [], isLastPage: true }),
+      );
+
+      await callTool("get_activities", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        start: 25,
+        limit: 50,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledWith(ACTIVITIES_URL, {
+        params: { start: 25, limit: 50 },
+      });
+    });
+
+    test("get_comments passes start and limit to the API", async () => {
+      mockApiGet.mockResolvedValueOnce(
+        createAxiosResponse({ values: [], isLastPage: true }),
+      );
+
+      await callTool("get_comments", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        start: 25,
+        limit: 50,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledWith(ACTIVITIES_URL, {
+        params: { start: 25, limit: 50 },
+      });
+    });
+
+    test("get_reviews passes start and limit to the API", async () => {
+      mockApiGet.mockResolvedValueOnce(
+        createAxiosResponse({ values: [], isLastPage: true }),
+      );
+
+      await callTool("get_reviews", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        start: 25,
+        limit: 50,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledWith(ACTIVITIES_URL, {
+        params: { start: 25, limit: 50 },
+      });
+    });
+
+    test("get_activities without pagination sends no params", async () => {
+      mockApiGet.mockResolvedValueOnce(
+        createAxiosResponse({ values: [], isLastPage: true }),
+      );
+
+      await callTool("get_activities", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledWith(ACTIVITIES_URL, {
+        params: {},
+      });
+    });
+
+    // ---- fetchAll walks multiple pages --------------------------------------
+
+    test("get_activities with fetchAll walks all pages and returns merged values", async () => {
+      mockApiGet
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [{ action: "COMMENTED", id: 1 }],
+            isLastPage: false,
+            nextPageStart: 1,
+          }),
+        )
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [{ action: "APPROVED", id: 2 }],
+            isLastPage: true,
+          }),
+        );
+
+      const result = await callTool("get_activities", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        fetchAll: true,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+      expect(mockApiGet).toHaveBeenNthCalledWith(1, ACTIVITIES_URL, {
+        params: { start: 0, limit: 100 },
+      });
+      expect(mockApiGet).toHaveBeenNthCalledWith(2, ACTIVITIES_URL, {
+        params: { start: 1, limit: 100 },
+      });
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.values).toHaveLength(2);
+      expect(parsed.isLastPage).toBe(true);
+      expect(parsed.size).toBe(2);
+    });
+
+    test("get_comments with fetchAll filters COMMENTED across all pages", async () => {
+      mockApiGet
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [
+              { action: "COMMENTED", id: 1 },
+              { action: "APPROVED", id: 2 },
+            ],
+            isLastPage: false,
+            nextPageStart: 2,
+          }),
+        )
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [
+              { action: "COMMENTED", id: 3 },
+              { action: "REVIEWED", id: 4 },
+            ],
+            isLastPage: true,
+          }),
+        );
+
+      const result = await callTool("get_comments", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        fetchAll: true,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+      const comments = JSON.parse(result.content[0].text);
+      expect(comments).toHaveLength(2);
+      expect(comments.every((c: { action: string }) => c.action === "COMMENTED")).toBe(true);
+    });
+
+    test("get_reviews with fetchAll filters APPROVED and REVIEWED across all pages", async () => {
+      mockApiGet
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [
+              { action: "COMMENTED", id: 1 },
+              { action: "APPROVED", id: 2 },
+            ],
+            isLastPage: false,
+            nextPageStart: 2,
+          }),
+        )
+        .mockResolvedValueOnce(
+          createAxiosResponse({
+            values: [
+              { action: "REVIEWED", id: 3 },
+              { action: "COMMENTED", id: 4 },
+            ],
+            isLastPage: true,
+          }),
+        );
+
+      const result = await callTool("get_reviews", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        fetchAll: true,
+      });
+
+      expect(mockApiGet).toHaveBeenCalledTimes(2);
+      const reviews = JSON.parse(result.content[0].text);
+      expect(reviews).toHaveLength(2);
+      expect(
+        reviews.every((r: { action: string }) =>
+          ["APPROVED", "REVIEWED"].includes(r.action),
+        ),
+      ).toBe(true);
+    });
+
+    // ---- paged result exposes nextPageStart ---------------------------------
+
+    test("get_comments returns isLastPage and nextPageStart for further paging", async () => {
+      mockApiGet.mockResolvedValueOnce(
+        createAxiosResponse({
+          values: [{ action: "COMMENTED", id: 1 }],
+          isLastPage: false,
+          nextPageStart: 25,
+        }),
+      );
+
+      const result = await callTool("get_comments", {
+        project: "TEST",
+        repository: "repo",
+        prId: 1,
+        limit: 25,
+      });
+
+      const parsed = JSON.parse(result.content[0].text);
+      expect(parsed.isLastPage).toBe(false);
+      expect(parsed.nextPageStart).toBe(25);
+      expect(parsed.values).toHaveLength(1);
     });
   });
 });

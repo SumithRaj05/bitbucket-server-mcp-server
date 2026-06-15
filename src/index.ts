@@ -124,6 +124,12 @@ interface ListOptions {
   start?: number;
 }
 
+interface ActivitiesPaginationOptions {
+  start?: number;
+  limit?: number;
+  fetchAll?: boolean;
+}
+
 interface ListRepositoriesOptions extends ListOptions {
   project?: string;
 }
@@ -434,7 +440,10 @@ export class BitbucketServer {
             properties: {
               project: { type: 'string', description: 'Bitbucket project key. If omitted, uses BITBUCKET_DEFAULT_PROJECT environment variable.' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
-              prId: { type: 'number', description: 'Pull request ID to get reviews for.' }
+              prId: { type: 'number', description: 'Pull request ID to get reviews for.' },
+              start: { type: 'number', description: 'Page offset (0-based). Use nextPageStart from a previous response to fetch the next page.' },
+              limit: { type: 'number', description: 'Maximum number of activities to return per page (default: 25, max: 100).' },
+              fetchAll: { type: 'boolean', description: 'When true, fetches all pages and returns the complete review history. Recommended when thorough analysis is needed.' }
             },
             required: ['repository', 'prId']
           }
@@ -447,7 +456,10 @@ export class BitbucketServer {
             properties: {
               project: { type: 'string', description: 'Bitbucket project key. If omitted, uses BITBUCKET_DEFAULT_PROJECT environment variable.' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
-              prId: { type: 'number', description: 'Pull request ID to get activities for.' }
+              prId: { type: 'number', description: 'Pull request ID to get activities for.' },
+              start: { type: 'number', description: 'Page offset (0-based). Use nextPageStart from a previous response to fetch the next page.' },
+              limit: { type: 'number', description: 'Maximum number of activities to return per page (default: 25, max: 100).' },
+              fetchAll: { type: 'boolean', description: 'When true, fetches all pages and returns the complete activity history. Recommended when thorough analysis is needed.' }
             },
             required: ['repository', 'prId']
           }
@@ -460,7 +472,10 @@ export class BitbucketServer {
             properties: {
               project: { type: 'string', description: 'Bitbucket project key. If omitted, uses BITBUCKET_DEFAULT_PROJECT environment variable.' },
               repository: { type: 'string', description: 'Repository slug containing the pull request.' },
-              prId: { type: 'number', description: 'Pull request ID to get comments for.' }
+              prId: { type: 'number', description: 'Pull request ID to get comments for.' },
+              start: { type: 'number', description: 'Page offset (0-based). Use nextPageStart from a previous response to fetch the next page.' },
+              limit: { type: 'number', description: 'Maximum number of activities to return per page (default: 25, max: 100).' },
+              fetchAll: { type: 'boolean', description: 'When true, fetches all pages and returns the complete comment history. Recommended for PRs with many comments.' }
             },
             required: ['repository', 'prId']
           }
@@ -839,7 +854,11 @@ export class BitbucketServer {
               repository: args.repository as string,
               prId: args.prId as number
             };
-            return await this.getReviews(reviewsPrParams);
+            return await this.getReviews(reviewsPrParams, {
+              start: args.start as number | undefined,
+              limit: args.limit as number | undefined,
+              fetchAll: args.fetchAll as boolean | undefined
+            });
           }
 
           case 'get_activities': {
@@ -848,7 +867,11 @@ export class BitbucketServer {
               repository: args.repository as string,
               prId: args.prId as number
             };
-            return await this.getActivities(activitiesPrParams);
+            return await this.getActivities(activitiesPrParams, {
+              start: args.start as number | undefined,
+              limit: args.limit as number | undefined,
+              fetchAll: args.fetchAll as boolean | undefined
+            });
           }
 
           case 'get_comments': {
@@ -857,7 +880,11 @@ export class BitbucketServer {
               repository: args.repository as string,
               prId: args.prId as number
             };
-            return await this.getComments(commentsPrParams);
+            return await this.getComments(commentsPrParams, {
+              start: args.start as number | undefined,
+              limit: args.limit as number | undefined,
+              fetchAll: args.fetchAll as boolean | undefined
+            });
           }
 
           case 'search': {
@@ -1596,41 +1623,116 @@ export class BitbucketServer {
     };
   }
 
-  private async getReviews(params: PullRequestParams) {
+  private async fetchAllActivityValues(
+    project: string,
+    repository: string,
+    prId: number
+  ): Promise<BitbucketActivity[]> {
+    const allValues: BitbucketActivity[] = [];
+    let nextStart = 0;
+    let isLastPage = false;
+
+    while (!isLastPage) {
+      const response = await this.api.get(
+        `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`,
+        { params: { start: nextStart, limit: 100 } }
+      );
+      allValues.push(...(response.data.values as BitbucketActivity[]));
+      isLastPage = response.data.isLastPage as boolean;
+      nextStart = (response.data.nextPageStart as number) ?? 0;
+    }
+
+    return allValues;
+  }
+
+  private async getReviews(params: PullRequestParams, pagination: ActivitiesPaginationOptions = {}) {
     const { project, repository, prId } = params;
-    
+
     if (!project || !repository || !prId) {
       throw new McpError(
         ErrorCode.InvalidParams,
         'Project, repository, and prId are required'
       );
     }
-    
+
+    const { start, limit, fetchAll } = pagination;
+
+    if (fetchAll) {
+      const allValues = await this.fetchAllActivityValues(project, repository, prId);
+      const reviews = allValues.filter(
+        (activity) => activity.action === 'APPROVED' || activity.action === 'REVIEWED'
+      );
+      return {
+        content: [{ type: 'text', text: JSON.stringify(reviews, null, 2) }]
+      };
+    }
+
+    const apiParams: Record<string, number> = {};
+
+    if (start !== undefined) {
+      apiParams.start = start;
+    }
+
+    if (limit !== undefined) {
+      apiParams.limit = limit;
+    }
+
     const response = await this.api.get(
-      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`
+      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`,
+      { params: apiParams }
     );
 
-    const reviews = response.data.values.filter(
-      (activity: BitbucketActivity) => activity.action === 'APPROVED' || activity.action === 'REVIEWED'
+    const reviews = (response.data.values as BitbucketActivity[]).filter(
+      (activity) => activity.action === 'APPROVED' || activity.action === 'REVIEWED'
     );
 
     return {
-      content: [{ type: 'text', text: JSON.stringify(reviews, null, 2) }]
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          values: reviews,
+          isLastPage: response.data.isLastPage,
+          nextPageStart: response.data.nextPageStart
+        }, null, 2)
+      }]
     };
   }
 
-  private async getActivities(params: PullRequestParams) {
+  private async getActivities(params: PullRequestParams, pagination: ActivitiesPaginationOptions = {}) {
     const { project, repository, prId } = params;
-    
+
     if (!project || !repository || !prId) {
       throw new McpError(
         ErrorCode.InvalidParams,
         'Project, repository, and prId are required'
       );
     }
-    
+
+    const { start, limit, fetchAll } = pagination;
+
+    if (fetchAll) {
+      const allValues = await this.fetchAllActivityValues(project, repository, prId);
+      return {
+        content: [{
+          type: 'text',
+          text: JSON.stringify({ values: allValues, isLastPage: true, size: allValues.length }, null, 2)
+        }]
+      };
+    }
+
+    const apiParams: Record<string, number> = {};
+
+    if (start !== undefined) {
+      apiParams.start = start;
+    }
+
+    if (limit !== undefined) {
+      apiParams.limit = limit;
+    }
+
     const response = await this.api.get(
-      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`
+      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`,
+      { params: apiParams }
     );
 
     return {
@@ -1638,26 +1740,54 @@ export class BitbucketServer {
     };
   }
 
-  private async getComments(params: PullRequestParams) {
+  private async getComments(params: PullRequestParams, pagination: ActivitiesPaginationOptions = {}) {
     const { project, repository, prId } = params;
-    
+
     if (!project || !repository || !prId) {
       throw new McpError(
         ErrorCode.InvalidParams,
         'Project, repository, and prId are required'
       );
     }
-    
+
+    const { start, limit, fetchAll } = pagination;
+
+    if (fetchAll) {
+      const allValues = await this.fetchAllActivityValues(project, repository, prId);
+      const comments = allValues.filter((activity) => activity.action === 'COMMENTED');
+      return {
+        content: [{ type: 'text', text: JSON.stringify(comments, null, 2) }]
+      };
+    }
+
+    const apiParams: Record<string, number> = {};
+
+    if (start !== undefined) {
+      apiParams.start = start;
+    }
+
+    if (limit !== undefined) {
+      apiParams.limit = limit;
+    }
+
     const response = await this.api.get(
-      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`
+      `/projects/${project}/repos/${repository}/pull-requests/${prId}/activities`,
+      { params: apiParams }
     );
 
-    const comments = response.data.values.filter(
-      (activity: BitbucketActivity) => activity.action === 'COMMENTED'
+    const comments = (response.data.values as BitbucketActivity[]).filter(
+      (activity) => activity.action === 'COMMENTED'
     );
 
     return {
-      content: [{ type: 'text', text: JSON.stringify(comments, null, 2) }]
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          values: comments,
+          isLastPage: response.data.isLastPage,
+          nextPageStart: response.data.nextPageStart
+        }, null, 2)
+      }]
     };
   }
 
