@@ -13,6 +13,7 @@ import { parseCustomHeaders } from "./headers.js";
 import winston from 'winston';
 import path from 'path';
 import os from 'os';
+import { fileURLToPath } from 'url';
 import fs from 'fs';
 
 // Resolve log file path: BITBUCKET_LOG_PATH env var > default (~/.bitbucket-server-mcp/bitbucket.log)
@@ -2267,7 +2268,10 @@ export class BitbucketServer {
 }
 
 // Entry point — only runs when this module is executed directly, not when imported.
-if (process.argv[1] === new URL(import.meta.url).pathname) {
+if (
+  process.argv[1] && 
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url))
+) {
   const server = new BitbucketServer();
   server.run().catch((error) => {
     logger.error('Server error', error);
